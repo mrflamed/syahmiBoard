@@ -1,0 +1,574 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>LAN Whiteboard</title>
+    <style>
+        body {
+            margin: 0;
+            padding: 20px;
+            font-family: Arial, sans-serif;
+        }
+
+        #login-container {
+            max-width: 300px;
+            margin: 50px auto;
+            padding: 20px;
+            border: 1px solid #ccc;
+            border-radius: 5px;
+        }
+
+        #whiteboard-container {
+            display: none;
+            max-width: 1200px;
+            margin: 0 auto;
+        }
+
+        #toolbar {
+            margin-bottom: 10px;
+            padding: 10px;
+            background: #f5f5f5;
+            border-radius: 5px;
+            display: flex;
+            gap: 10px;
+            align-items: center;
+        }
+
+        #canvas {
+            border: 1px solid #ccc;
+            cursor: crosshair;
+        }
+
+        .tool-button {
+            padding: 5px 10px;
+            border: 1px solid #ccc;
+            border-radius: 3px;
+            background: white;
+            cursor: pointer;
+        }
+
+        .tool-button.active {
+            background: #e0e0e0;
+        }
+
+        #user-list {
+            position: fixed;
+            right: 20px;
+            top: 20px;
+            background: white;
+            padding: 10px;
+            border: 1px solid #ccc;
+            border-radius: 5px;
+        }
+
+        #connection-status {
+            position: fixed;
+            bottom: 20px;
+            right: 20px;
+            padding: 10px;
+            border-radius: 5px;
+            background: #4CAF50;
+            color: white;
+            display: none;
+        }
+
+        #connection-status.disconnected {
+            background: #d32f2f;
+        }
+
+        /* Add these to your existing style section */
+        @media (max-width: 768px) {
+            body {
+                padding: 10px;
+            }
+
+            #toolbar {
+                flex-wrap: wrap;
+                justify-content: center;
+            }
+
+            .tool-button {
+                padding: 12px 20px;
+                /* Larger touch targets */
+                margin: 5px;
+            }
+
+            #canvas {
+                touch-action: none;
+                /* Prevent default touch actions */
+            }
+
+            #user-list {
+                position: static;
+                margin-top: 20px;
+                width: auto;
+            }
+
+            input[type="range"],
+            input[type="color"] {
+                width: 100px;
+                height: 40px;
+            }
+        }
+
+        .error {
+            color: red;
+            margin-top: 10px;
+        }
+    </style>
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+</head>
+
+<body>
+    <div id="mobile-instructions"
+        style="display: none; margin: 10px 0; padding: 10px; background: #f0f0f0; border-radius: 5px;">
+        Touch and drag to draw. Use two fingers to scroll the page.
+    </div>
+    <div id="login-container">
+        <h2>Login to Whiteboard</h2>
+        <div>
+            <input type="text" id="username" placeholder="Username" />
+            <input type="password" id="password" placeholder="Password" />
+            <button onclick="login()">Login</button>
+        </div>
+        <div id="login-error" class="error"></div>
+        <div style="margin-top: 10px; font-size: 0.8em; color: #666;">
+            Available users: user1, user2, user3, user4, user5<br>
+            Passwords: pass1, pass2, pass3, pass4, pass5
+        </div>
+    </div>
+
+    <div id="whiteboard-container">
+        <div id="toolbar">
+            <button class="tool-button active" id="draw-button" onclick="setTool('draw')">Draw</button>
+            <button class="tool-button" id="eraser-button" onclick="setTool('eraser')">Eraser</button>
+            <button class="tool-button" id="text-button" onclick="setTool('text')">Text</button>
+            <input type="color" id="color-picker" value="#000000">
+            <input type="range" id="size-picker" min="1" max="20" value="2">
+            <span id="size-label">Size: 2</span>
+            <button class="tool-button" onclick="clearCanvas()">Clear</button>
+        </div>
+        <canvas id="canvas"></canvas>
+        <div id="user-list">
+            <h3>Connected Users</h3>
+            <ul id="users"></ul>
+        </div>
+    </div>
+
+    <script>
+        let ws;
+        let isDrawing = false;
+        let currentTool = 'draw';
+        let currentUsername = '';
+        let canvas, ctx;
+
+        let reconnectAttempts = 0;
+        let pingInterval;
+        // Initialize canvas
+        function initCanvas() {
+            canvas = document.getElementById('canvas');
+            ctx = canvas.getContext('2d', { willReadFrequently: true });
+
+            // Set canvas size
+            canvas.width = Math.min(window.innerWidth - 25, 1200);
+            canvas.height = Math.min(window.innerHeight - 150, 800);
+
+            // Set initial canvas background to white
+            ctx.fillStyle = 'white';
+            ctx.fillRect(0, 0, canvas.width, canvas.height);
+
+            // Set default drawing styles
+            ctx.lineCap = 'round';
+            ctx.lineJoin = 'round';
+
+            // Mouse events
+            canvas.addEventListener('mousedown', startDrawing);
+            canvas.addEventListener('mousemove', draw);
+            canvas.addEventListener('mouseup', stopDrawing);
+            canvas.addEventListener('mouseout', stopDrawing);
+            canvas.addEventListener('click', handleCanvasClick);
+
+            // Touch events
+            canvas.addEventListener('touchstart', handleTouchStart, { passive: false });
+            canvas.addEventListener('touchmove', handleTouchMove, { passive: false });
+            canvas.addEventListener('touchend', handleTouchEnd);
+            canvas.addEventListener('touchcancel', handleTouchEnd);
+
+            // Add color and size change listeners
+            document.getElementById('color-picker').addEventListener('change', updateColor);
+            document.getElementById('size-picker').addEventListener('input', updateSize);
+        }
+
+        function handleTouchStart(e) {
+            e.preventDefault(); // Prevent scrolling
+
+            const touch = e.touches[0];
+            const rect = canvas.getBoundingClientRect();
+            lastX = touch.clientX - rect.left;
+            lastY = touch.clientY - rect.top;
+
+            isDrawing = true;
+
+            if (currentTool === 'eraser') {
+                ctx.globalCompositeOperation = 'destination-out';
+            } else {
+                ctx.globalCompositeOperation = 'source-over';
+                ctx.strokeStyle = document.getElementById('color-picker').value;
+            }
+            ctx.lineWidth = document.getElementById('size-picker').value;
+        }
+
+        function handleTouchMove(e) {
+            e.preventDefault(); // Prevent scrolling
+
+            if (!isDrawing) return;
+
+            const touch = e.touches[0];
+            const rect = canvas.getBoundingClientRect();
+            const currentX = touch.clientX - rect.left;
+            const currentY = touch.clientY - rect.top;
+
+            // Draw on local canvas
+            ctx.beginPath();
+            ctx.moveTo(lastX, lastY);
+            ctx.lineTo(currentX, currentY);
+            ctx.stroke();
+
+            // Send drawing data
+            if (ws && ws.readyState === WebSocket.OPEN) {
+                ws.send(JSON.stringify({
+                    type: 'draw',
+                    x0: lastX,
+                    y0: lastY,
+                    x1: currentX,
+                    y1: currentY,
+                    color: currentTool === 'eraser' ? 'eraser' : ctx.strokeStyle,
+                    size: ctx.lineWidth,
+                    tool: currentTool
+                }));
+            }
+
+            lastX = currentX;
+            lastY = currentY;
+        }
+
+        function handleTouchEnd(e) {
+            e.preventDefault();
+            isDrawing = false;
+            ctx.globalCompositeOperation = 'source-over'; // Reset to default
+        }
+
+        // Connect to WebSocket server
+        function connectWebSocket() {
+            const host = window.location.hostname;
+            const port = window.location.port || '3004';
+
+            try {
+                ws = new WebSocket(`ws://${host}:${port}`);
+
+                ws.onopen = () => {
+                    console.log('Connected to server');
+                    showConnectionStatus('Connected', false);
+                    reconnectAttempts = 0;
+                    startPingInterval();
+                };
+
+                ws.onmessage = handleMessage;
+
+                ws.onerror = (error) => {
+                    console.error('WebSocket error:', error);
+                    showConnectionStatus('Connection error', true);
+                };
+
+                ws.onclose = () => {
+                    console.log('WebSocket connection closed');
+                    showConnectionStatus('Disconnected', true);
+                    clearInterval(pingInterval);
+                    handleReconnect();
+                };
+            } catch (error) {
+                console.error('Error connecting to WebSocket:', error);
+                showConnectionStatus('Connection failed', true);
+                handleReconnect();
+            }
+        }
+
+        function startPingInterval() {
+            clearInterval(pingInterval);
+            pingInterval = setInterval(() => {
+                if (ws.readyState === WebSocket.OPEN) {
+                    ws.send(JSON.stringify({ type: 'ping' }));
+                }
+            }, 30000);
+        }
+
+        function handleReconnect() {
+            if (reconnectAttempts < 5) {
+                reconnectAttempts++;
+                const delay = Math.min(1000 * Math.pow(2, reconnectAttempts), 30000);
+                setTimeout(connectWebSocket, delay);
+            } else {
+                showConnectionStatus('Connection lost. Please refresh the page.', true);
+            }
+        }
+
+        function showConnectionStatus(message, isError) {
+            const status = document.getElementById('connection-status');
+            status.textContent = message;
+            status.style.display = 'block';
+            status.className = isError ? 'disconnected' : '';
+        }
+
+        // Login function
+        function login() {
+            const username = document.getElementById('username').value;
+            const password = document.getElementById('password').value;
+
+            ws.send(JSON.stringify({
+                type: 'login',
+                username: username,
+                password: password
+            }));
+        }
+
+        // Handle incoming messages
+        function handleMessage(event) {
+            try {
+                const data = JSON.parse(event.data);
+
+                switch (data.type) {
+                    case 'login_response':
+                        handleLoginResponse(data);
+                        break;
+                    case 'draw':
+                        handleDrawData(data);
+                        break;
+                    case 'text':
+                        handleTextData(data);
+                        break;
+                    case 'clear':
+                        if (data.username !== currentUsername) {
+                            ctx.fillStyle = 'white';
+                            ctx.fillRect(0, 0, canvas.width, canvas.height);
+                        }
+                        break;
+                    case 'user_list':
+                        updateUserList(data.users);
+                        break;
+                    case 'error':
+                        console.error('Server error:', data.message);
+                        break;
+                }
+            } catch (error) {
+                console.error('Error handling message:', error);
+            }
+        }
+
+        // Handle login response
+        function handleLoginResponse(data) {
+            if (data.success) {
+                currentUsername = data.username;
+                document.getElementById('login-container').style.display = 'none';
+                document.getElementById('whiteboard-container').style.display = 'block';
+
+                // Show mobile instructions if on a touch device
+                if ('ontouchstart' in window) {
+                    document.getElementById('mobile-instructions').style.display = 'block';
+                }
+
+                initCanvas();
+            } else {
+                document.getElementById('login-error').textContent = data.message;
+            }
+        }
+
+        // Drawing functions
+        let lastX = 0;
+        let lastY = 0;
+
+        function startDrawing(e) {
+            isDrawing = true;
+            const pos = getMousePos(e);
+            lastX = pos.x;
+            lastY = pos.y;
+
+            if (currentTool === 'eraser') {
+                ctx.globalCompositeOperation = 'destination-out';
+            } else {
+                ctx.globalCompositeOperation = 'source-over';
+                ctx.strokeStyle = document.getElementById('color-picker').value;
+            }
+            ctx.lineWidth = document.getElementById('size-picker').value;
+        }
+        function stopDrawing() {
+            isDrawing = false;
+            ctx.globalCompositeOperation = 'source-over'; // Reset to default
+        }
+
+        function draw(e) {
+            if (!isDrawing) return;
+
+            const pos = getMousePos(e);
+
+            // Draw on local canvas
+            ctx.beginPath();
+            ctx.moveTo(lastX, lastY);
+            ctx.lineTo(pos.x, pos.y);
+            ctx.stroke();
+
+            // Send drawing data
+            if (ws && ws.readyState === WebSocket.OPEN) {
+                ws.send(JSON.stringify({
+                    type: 'draw',
+                    x0: lastX,
+                    y0: lastY,
+                    x1: pos.x,
+                    y1: pos.y,
+                    color: currentTool === 'eraser' ? 'eraser' : ctx.strokeStyle,
+                    size: ctx.lineWidth,
+                    tool: currentTool
+                }));
+            }
+
+            lastX = pos.x;
+            lastY = pos.y;
+        }
+
+
+        // Handle incoming drawing data
+        function handleDrawData(data) {
+            ctx.beginPath();
+
+            if (data.tool === 'eraser') {
+                ctx.globalCompositeOperation = 'destination-out';
+                ctx.strokeStyle = 'rgba(0,0,0,1)';
+            } else {
+                ctx.globalCompositeOperation = 'source-over';
+                ctx.strokeStyle = data.color;
+            }
+
+            ctx.lineWidth = data.size;
+            ctx.lineCap = 'round';
+            ctx.lineJoin = 'round';
+
+            ctx.moveTo(data.x0, data.y0);
+            ctx.lineTo(data.x1, data.y1);
+            ctx.stroke();
+            ctx.closePath();
+
+            // Reset to default
+            ctx.globalCompositeOperation = 'source-over';
+        }
+
+        // Text tool
+        function handleCanvasClick(e) {
+            if (currentTool === 'text') {
+                const text = prompt('Enter text:');
+                if (text) {
+                    const pos = getMousePos(e);
+                    ctx.font = '16px Arial';
+                    ctx.fillStyle = document.getElementById('color-picker').value;
+                    ctx.fillText(text, pos.x, pos.y);
+
+                    // Send text data
+                    ws.send(JSON.stringify({
+                        type: 'text',
+                        x: pos.x,
+                        y: pos.y,
+                        text: text,
+                        color: ctx.fillStyle
+                    }));
+                }
+            }
+        }
+
+        // Handle incoming text data
+        function handleTextData(data) {
+            ctx.font = '16px Arial';
+            ctx.fillStyle = data.color;
+            ctx.fillText(data.text, data.x, data.y);
+        }
+
+        // Utility functions
+        function getMousePos(e) {
+            const rect = canvas.getBoundingClientRect();
+            if (e.touches) {
+                // Touch event
+                return {
+                    x: e.touches[0].clientX - rect.left,
+                    y: e.touches[0].clientY - rect.top
+                };
+            } else {
+                // Mouse event
+                return {
+                    x: e.clientX - rect.left,
+                    y: e.clientY - rect.top
+                };
+            }
+        }
+
+        function setTool(tool) {
+            currentTool = tool;
+            document.querySelectorAll('.tool-button').forEach(btn => btn.classList.remove('active'));
+            document.getElementById(`${tool}-button`).classList.add('active');
+
+            if (ctx) {
+                if (tool === 'eraser') {
+                    ctx.globalCompositeOperation = 'destination-out';
+                } else {
+                    ctx.globalCompositeOperation = 'source-over';
+                    ctx.strokeStyle = document.getElementById('color-picker').value;
+                }
+            }
+        }
+
+        function updateColor(e) {
+            if (currentTool !== 'eraser') {
+                ctx.strokeStyle = e.target.value;
+            }
+        }
+
+        function updateSize(e) {
+            ctx.lineWidth = e.target.value;
+            document.getElementById('size-label').textContent = `Size: ${e.target.value}`;
+        }
+
+        function clearCanvas() {
+            if (!ctx) return;  // Guard against undefined context
+
+            try {
+                ctx.fillStyle = 'white';
+                ctx.fillRect(0, 0, canvas.width, canvas.height);
+
+                if (ws && ws.readyState === WebSocket.OPEN) {
+                    ws.send(JSON.stringify({
+                        type: 'clear',
+                        username: currentUsername
+                    }));
+                } else {
+                    console.error('WebSocket not connected');
+                    handleConnectionError();
+                }
+            } catch (error) {
+                console.error('Error clearing canvas:', error);
+            }
+        }
+        function handleConnectionError() {
+            alert('Connection lost. The page will refresh to reconnect.');
+            window.location.reload();
+        }
+
+        function updateUserList(users) {
+            const usersList = document.getElementById('users');
+            usersList.innerHTML = users.map(user => `<li>${user}</li>`).join('');
+        }
+
+        // Connect when page loads
+        connectWebSocket();
+    </script>
+    <div id="connection-status">Connection Status</div>
+</body>
+
+</html>
